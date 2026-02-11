@@ -31,7 +31,7 @@ func run() int {
 		noNet        bool
 		noUTS        bool
 		host         string
-		overlay      bool
+		noOverlay    bool
 		overlayLower string
 		overlaySize  string
 		noCgroup     bool
@@ -41,6 +41,10 @@ func run() int {
 		pidsMax      int
 		logDir       string
 		logLevel     string
+		noSeccomp    bool
+		seccompLog   bool
+		noPivotRoot  bool
+		rootfs       string
 	)
 
 	flag.BoolVar(&noPID, "no-pid", false, "disable PID namespace isolation")
@@ -48,7 +52,7 @@ func run() int {
 	flag.BoolVar(&noNet, "no-net", false, "disable network namespace isolation")
 	flag.BoolVar(&noUTS, "no-uts", false, "disable UTS namespace isolation")
 	flag.StringVar(&host, "hostname", "sandbox", "hostname inside the sandbox")
-	flag.BoolVar(&overlay, "overlay", false, "enable OverlayFS filesystem isolation")
+	flag.BoolVar(&noOverlay, "no-overlay", false, "disable OverlayFS filesystem isolation (DANGEROUS: allows host modification)")
 	flag.StringVar(&overlayLower, "overlay-lower", "/", "lower directory for OverlayFS (read-only base)")
 	flag.StringVar(&overlaySize, "overlay-size", "64m", "tmpfs size limit for OverlayFS upper layer")
 	flag.BoolVar(&noCgroup, "no-cgroup", false, "disable cgroups v2 resource limits")
@@ -58,6 +62,10 @@ func run() int {
 	flag.IntVar(&pidsMax, "pids-max", 512, "maximum number of processes (0=unlimited)")
 	flag.StringVar(&logDir, "log-dir", "/var/log/ai-sandbox", "log file storage directory")
 	flag.StringVar(&logLevel, "log-level", "info", "log level: debug/info/warn/error")
+	flag.BoolVar(&noSeccomp, "no-seccomp", false, "disable seccomp syscall filtering")
+	flag.BoolVar(&seccompLog, "seccomp-log", false, "log seccomp violations instead of killing")
+	flag.BoolVar(&noPivotRoot, "no-pivot-root", false, "disable pivot_root confinement")
+	flag.StringVar(&rootfs, "rootfs", "", "rootfs path for pivot_root (without overlay)")
 	flag.Parse()
 
 	args := flag.Args()
@@ -68,10 +76,11 @@ func run() int {
 		flag.PrintDefaults()
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Example:")
-		fmt.Fprintln(os.Stderr, "  ai-sandbox python agent.py")
+		fmt.Fprintln(os.Stderr, "  ai-sandbox sh -c 'echo hello'")
 		fmt.Fprintln(os.Stderr, "  ai-sandbox --no-net sh -c 'echo hello'")
-		fmt.Fprintln(os.Stderr, "  ai-sandbox --overlay sh -c 'touch /tmp/test && ls /tmp/test'")
+		fmt.Fprintln(os.Stderr, "  ai-sandbox sh -c 'touch /tmp/test && ls /tmp/test'")
 		fmt.Fprintln(os.Stderr, "  ai-sandbox --memory-max 1g --cpu-quota 50000 python agent.py")
+		fmt.Fprintln(os.Stderr, "  ai-sandbox --no-overlay sh -c 'echo no isolation'  # DANGEROUS")
 		return ExitFailure
 	}
 
@@ -113,8 +122,8 @@ func run() int {
 	ns.SetLogger(logger)
 	defer ns.Cleanup()
 
-	// 配置OverlayFS（如果启用）
-	if overlay {
+	// 配置OverlayFS（默认启用：保护宿主机文件系统不被修改）
+	if !noOverlay {
 		ovConfig := sandbox.DefaultOverlayConfig(overlayLower)
 		ovConfig.TmpfsSize = overlaySize
 		ov := sandbox.NewOverlayFS(ovConfig)
@@ -148,6 +157,22 @@ func run() int {
 			return ExitFailure
 		}
 		ns.SetCgroupsV2(cg)
+	}
+
+	// 配置 Seccomp-BPF（默认启用）
+	if !noSeccomp {
+		scfg := sandbox.DefaultSeccompConfig()
+		scfg.LogDenied = seccompLog
+		ns.SetSeccomp(&scfg)
+	}
+
+	// 配置 PivotRoot（默认启用）
+	if !noPivotRoot {
+		pcfg := sandbox.DefaultPivotRootConfig()
+		if rootfs != "" {
+			pcfg.RootDir = rootfs
+		}
+		ns.SetPivotRoot(&pcfg)
 	}
 
 	result, err := ns.Execute(args[0], args[1:]...)

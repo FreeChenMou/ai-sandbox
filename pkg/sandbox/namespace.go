@@ -72,6 +72,8 @@ type initConfig struct {
 	MountProc     bool               `json:"mount_proc,omitempty"`
 	SetupLoopback bool               `json:"setup_loopback,omitempty"`
 	Overlay       *overlayInitConfig `json:"overlay,omitempty"`
+	PivotRoot     *pivotRootConfig   `json:"pivot_root,omitempty"`
+	Seccomp       *seccompInitConfig `json:"seccomp,omitempty"`
 	Command       string             `json:"command"`
 	Args          []string           `json:"args,omitempty"`
 	Env           []string           `json:"env,omitempty"`
@@ -91,15 +93,17 @@ type ExecResult struct {
 //	defer ns.Cleanup()
 //	result, err := ns.Execute("python", "agent.py")
 type Namespace struct {
-	config    NamespaceConfig
-	overlayFS *OverlayFS
-	cgroupsV2 *CgroupsV2
-	logger    *zap.Logger
-	cmd       *exec.Cmd
-	pid       int
-	running   bool
-	done      chan struct{}
-	mu        sync.Mutex
+	config          NamespaceConfig
+	overlayFS       *OverlayFS
+	cgroupsV2       *CgroupsV2
+	seccompConfig   *SeccompConfig
+	pivotRootConfig *PivotRootConfig
+	logger          *zap.Logger
+	cmd             *exec.Cmd
+	pid             int
+	running         bool
+	done            chan struct{}
+	mu              sync.Mutex
 
 	// 外部可配置的IO（默认继承父进程）
 	Stdin  *os.File
@@ -145,6 +149,22 @@ func (ns *Namespace) SetLogger(l *zap.Logger) {
 	ns.mu.Lock()
 	defer ns.mu.Unlock()
 	ns.logger = l
+}
+
+// SetSeccomp 设置 Seccomp-BPF 系统调用过滤配置。
+// 必须在Start()之前调用。子进程将在 exec 前加载 seccomp 过滤器。
+func (ns *Namespace) SetSeccomp(cfg *SeccompConfig) {
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	ns.seccompConfig = cfg
+}
+
+// SetPivotRoot 设置 pivot_root 目录禁锢配置。
+// 必须在Start()之前调用。子进程将在 OverlayFS 挂载后执行 pivot_root。
+func (ns *Namespace) SetPivotRoot(cfg *PivotRootConfig) {
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	ns.pivotRootConfig = cfg
 }
 
 // cloneFlags 根据配置组合syscall clone flags。
@@ -278,6 +298,37 @@ func (ns *Namespace) Start(command string, args ...string) error {
 	// 注入OverlayFS配置（如果已绑定）
 	if ns.overlayFS != nil {
 		cfg.Overlay = ns.overlayFS.InitConfig()
+	}
+
+	// 注入 PivotRoot 配置
+	if ns.pivotRootConfig != nil && ns.pivotRootConfig.Enabled {
+		cfg.PivotRoot = &pivotRootConfig{
+			RootDir: ns.pivotRootConfig.RootDir,
+		}
+	}
+
+	// 注入 Seccomp 配置（父进程负责解析 syscall 名称为号码）
+	if ns.seccompConfig != nil && ns.seccompConfig.Enabled {
+		blocklist := ns.seccompConfig.BlockedSyscalls
+		if len(blocklist) == 0 {
+			blocklist = defaultBlockedSyscalls
+		}
+		nrs, err := resolveBlocklist(blocklist)
+		if err != nil {
+			cmd.Process.Kill()
+			cmd.Wait()
+			pipeW.Close()
+			return fmt.Errorf("namespace: resolve seccomp blocklist: %w", err)
+		}
+		families := ns.seccompConfig.BlockedSocketFamilies
+		if len(families) == 0 {
+			families = defaultBlockedSocketFamilies
+		}
+		cfg.Seccomp = &seccompInitConfig{
+			BlockedSyscalls:       nrs,
+			BlockedSocketFamilies: families,
+			LogDenied:             ns.seccompConfig.LogDenied,
+		}
 	}
 
 	if err := json.NewEncoder(pipeW).Encode(&cfg); err != nil {

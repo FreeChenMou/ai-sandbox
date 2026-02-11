@@ -43,7 +43,7 @@ run_test() {
     local name="$1"
     local timeout="${2:-60s}"
     local output
-    output=$(go test -v -timeout "$timeout" -run "^${name}$" ./pkg/sandbox/ 2>&1)
+    output=$(go test -v -timeout "$timeout" -run "^${name}$" ./pkg/sandbox/ 2>&1) || true
     if echo "$output" | grep -q "^--- PASS:"; then
         log_pass "$name"
     elif echo "$output" | grep -q "^--- SKIP:"; then

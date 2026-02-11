@@ -22,7 +22,7 @@
 | 模块 | 周数 | 难度 | 关键度 | 完整规划 |
 |------|------|------|--------|---------|
 | [2.1 Seccomp-BPF](./modules/module-2.1-seccomp.md) | 1周 | ★★★★ | 🔴 关键 | [详情](./modules/module-2.1-seccomp.md) |
-| [2.2 Chroot/Pivot Root](./modules/module-2.2-chroot.md) | 0.5周 | ★★ | 🔴 关键 | [详情](./modules/module-2.2-chroot.md) |
+| [2.2 Pivot Root](./modules/module-2.2-pivotroot.md) | 0.5周 | ★★ | 🔴 关键 | [详情](./modules/module-2.2-pivotroot.md) |
 | [2.3 Sidecar Proxy](./modules/module-2.3-proxy.md) | 1周 | ★★★ | 🟡 可选 | [详情](./modules/module-2.3-proxy.md) |
 
 ---
@@ -30,32 +30,39 @@
 ## 关键决策
 
 ### Seccomp规则白名单 vs 黑名单
-- **决策**：使用白名单（更安全）
-- **理由**：黑名单容易遗漏新的危险syscall
+- **决策**：使用黑名单模式
+- **理由**：Namespace + OverlayFS 已限制 Agent 的可见域，Seccomp 只需禁止内核级危险操作。黑名单模式对 Agent 兼容性更好。
 
 ### 何时启用Seccomp
-- **决策**：Agent启动时立即加载
-- **理由**：越早拦截越好
+- **决策**：在 nsInit() 中所有特权操作完成后、exec 前加载
+- **理由**：mount、pivot_root、sethostname 等操作需要在 seccomp 之前完成
 
 ### 故障处理
-- **决策**：违反Seccomp规则的进程被SECCOMP_RET_KILL
+- **决策**：违反Seccomp规则的进程被SECCOMP_RET_KILL_PROCESS
 - **理由**：保证系统安全，不允许继续执行
+
+### Chroot vs Pivot Root
+- **决策**：使用 pivot_root 而非 chroot
+- **理由**：pivot_root 彻底卸载旧根文件系统，比 chroot 更安全（chroot 可被逃逸）
 
 ---
 
 ## 验收标准（必须全部通过）
 
 ### Seccomp模块
-- ✅ 白名单syscall正常执行
-- ✅ 黑名单syscall被拦截（返回EACCES）
-- ✅ Agent因违规被kill，无信息泄露
-- ✅ dmesg中有seccomp kill日志
+- ✅ 黑名单syscall被拦截（进程被KILL_PROCESS）
+- ✅ 不安全socket协议族被拦截（AF_NETLINK、AF_PACKET等）
+- ✅ Agent因违规被kill，退出码非零
+- ✅ 正常操作（echo、ls、网络）不受影响
+- ✅ 日志模式可选（LogDenied）
 - ✅ 性能开销<2%
 
-### Chroot模块
-- ✅ 进程getcwd()返回正确相对位置
-- ✅ 尝试../../../etc失败
-- ✅ readlink(/proc/self/root)显示新root
+### Pivot Root模块
+- ✅ pivot_root后 / 是overlay merged目录
+- ✅ /.pivot_old被卸载和删除
+- ✅ 尝试../../../etc 逃逸失败
+- ✅ /dev/null、/dev/zero、/dev/urandom可用
+- ✅ /proc正确挂载
 
 ### 集成验证
 - ✅ 运行恶意脚本被拦截

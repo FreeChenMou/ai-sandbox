@@ -1,14 +1,14 @@
 # 模块1.1：Namespace隔离
 
-**阶段**：1 | **周数**：1周 | **难度**：★★★ | **关键度**：🔴 关键
+**阶段**：1 | **周数**：1周 | **难度**：★★★ | **关键度**：关键 | **状态**：已完成
 
 ---
 
 ## 模块概述
 
-Namespace 是 Linux 提供的进程隔离机制，允许创建独立的进程树、文件系统挂载、网络栈、IPC等资源的"虚拟视图"。本模块实现对Namespace的创建、管理和清理。
+Namespace 是 Linux 提供的进程隔离机制，允许创建独立的进程树、文件系统挂载、网络栈、IPC等资源的"虚拟视图"。本模块是整个沙箱系统的核心骨架，负责 Namespace 的创建、管理和清理，并通过 reexec 模式在新 Namespace 中执行子进程初始化。
 
-**模块目标**：为Agent提供独立的进程/IPC/文件系统挂载/网络命名空间，确保进程树、消息队列、网络等资源被隔离。
+**模块目标**：为 Agent 提供独立的 PID/IPC/Mount/Network/UTS 命名空间，并作为其他模块（OverlayFS、Cgroups、Seccomp、PivotRoot）的集成点。
 
 ---
 
@@ -16,89 +16,141 @@ Namespace 是 Linux 提供的进程隔离机制，允许创建独立的进程树
 
 | 需求 | 说明 | 验证方法 |
 |------|------|---------|
-| **PID Namespace** | Agent进程看到的PID为1，无法看到宿主机进程 | 在隔离环境中`echo $$` |
-| **IPC Namespace** | Agent进程间通信资源隔离，无法跨Namespace通信 | `ipcs` 命令验证 |
-| **Mount Namespace** | Agent有独立的文件系统挂载点视图 | 后续与OverlayFS配合验证 |
-| **Network Namespace** | 网络资源隔离（基础支持，详细配置在第2阶段） | `ip netns exec` 验证 |
-| **UTS Namespace** | 独立的hostname（可选，第2阶段实现） | `hostname` 命令验证 |
-| **清理机制** | 隔离环境销毁时，所有Namespace资源被释放 | 检查`/proc/[pid]/ns`目录 |
+| **PID Namespace** | Agent 进程在新 Namespace 中 PID 为 1，无法看到宿主机进程 | `echo $$` 返回 1 |
+| **IPC Namespace** | 进程间通信资源隔离，System V IPC / POSIX 消息队列独立 | `ipcs -q` 在隔离环境中为空 |
+| **Mount Namespace** | 独立的文件系统挂载点视图，为 OverlayFS 提供基础 | 与 OverlayFS 配合验证 |
+| **Network Namespace** | 网络栈隔离：独立网卡、路由表、iptables | `ip link show` 仅显示 lo |
+| **UTS Namespace** | 独立的 hostname | `hostname` 命令返回设置值 |
+| **Reexec 机制** | 通过 /proc/self/exe 重新执行自身，在新 Namespace 中运行 init | 子进程正确读取管道配置 |
+| **模块集成** | 可绑定 OverlayFS、Cgroups、Seccomp、PivotRoot | 各模块 Set 方法正常工作 |
+| **清理机制** | 清理函数按注册逆序执行，释放所有资源 | 清理后无残留进程和目录 |
 
 ---
 
-## 技术实现范围
+## 技术实现
 
-### 1. PID Namespace隔离
+### 架构设计
 
 ```
-宿主机视图：                隔离环境视图：
-├─ systemd (PID 1)         ├─ Agent (PID 1)
-├─ sshd (PID 1234)         └─ Child (PID 2)
-├─ Agent (PID 5678)           （看不到宿主机进程）
-└─ ...
+父进程                              子进程（新 Namespace）
+  │                                    │
+  │ Start()                            │
+  ├─ 创建 config pipe + log pipe       │
+  ├─ fork /proc/self/exe               │
+  │   __sandbox_init__                 │
+  ├─ AddProcess(pid) → cgroup          │ ← 阻塞在管道读取
+  ├─ 注入 initConfig (JSON via pipe)   │
+  │                                    ├─ nsInit()
+  │                                    ├─ 读取 initConfig
+  │                                    ├─ mount propagation private
+  │                                    ├─ mountOverlay()
+  │                                    ├─ doPivotRoot()
+  │                                    ├─ mountProc()
+  │                                    ├─ sethostname()
+  │                                    ├─ setupLoopback()
+  │                                    ├─ applySeccomp()
+  │                                    └─ syscall.Exec(用户命令)
+  │
+  ├─ Wait()
+  └─ Cleanup() (逆序)
+      ├─ Kill 进程
+      ├─ CgroupsV2.Cleanup()
+      └─ OverlayFS.Cleanup()
 ```
 
-**实现要点**：
-- 使用 `unshare(CLONE_NEWPID)` 创建新PID Namespace
-- Agent进程在新Namespace中PID为1
-- 宿主机可以看到Agent的真实PID，但Agent看不到宿主机的PID
+### 核心类型
 
-**关键代码片段** (伪代码示意)：
-```
-func CreatePIDNamespace() {
-    // 在新PID Namespace中fork进程
-    cmd := exec.Command("bash")
-    cmd.SysProcAttr = &syscall.SysProcAttr{
-        Cloneflags: syscall.CLONE_NEWPID,
-    }
-    cmd.Run()
-    // Agent进程将看到PID=1
+**NamespaceConfig**（`namespace.go:30`）：
+```go
+type NamespaceConfig struct {
+    PID           bool   // 进程树隔离
+    IPC           bool   // 进程间通信隔离
+    Mount         bool   // 文件系统挂载隔离
+    Network       bool   // 网络栈隔离
+    UTS           bool   // 主机名隔离
+    Hostname      string // UTS Namespace 中的主机名
+    MountProc     bool   // 重新挂载 /proc
+    SetupLoopback bool   // 启动 lo 网卡
 }
 ```
 
-### 2. IPC Namespace隔离
-
+**Namespace**（`namespace.go:95`）：
+```go
+type Namespace struct {
+    config          NamespaceConfig
+    overlayFS       *OverlayFS
+    cgroupsV2       *CgroupsV2
+    seccompConfig   *SeccompConfig
+    pivotRootConfig *PivotRootConfig
+    logger          *zap.Logger
+    cmd             *exec.Cmd
+    pid             int
+    running         bool
+    done            chan struct{}
+    mu              sync.Mutex
+    Stdin, Stdout, Stderr *os.File
+    Env             []string
+    Dir             string
+    cleanups        []func() error
+}
 ```
-宿主机IPC资源：              隔离环境IPC资源：
-├─ SharedMemory (ID: 100)   ├─ SharedMemory (ID: 100)
-├─ MessageQueue (ID: 200)   │  （独立，与宿主机无关）
-└─ Semaphore (ID: 300)      └─ Semaphore (ID: 200)
+
+**initConfig**（`namespace.go:70`）：通过管道传递给子进程的 JSON 配置，包含所有模块的初始化参数。
+
+### 预设配置
+
+| 配置 | 函数 | 启用的 Namespace |
+|------|------|-----------------|
+| 默认（推荐） | `DefaultNamespaceConfig()` | PID + IPC + Mount + Network + UTS，hostname="sandbox" |
+| 最小 | `MinimalNamespaceConfig()` | PID + Mount |
+
+### 关键方法
+
+| 方法 | 说明 |
+|------|------|
+| `NewNamespace(config)` | 创建管理器 |
+| `SetOverlayFS(ov)` | 绑定 OverlayFS（Start 前调用） |
+| `SetCgroupsV2(cg)` | 绑定 Cgroups（Start 前调用） |
+| `SetSeccomp(cfg)` | 绑定 Seccomp 过滤器（Start 前调用） |
+| `SetPivotRoot(cfg)` | 绑定 PivotRoot 禁锢（Start 前调用） |
+| `SetLogger(l)` | 设置日志记录器（Start 前调用） |
+| `Execute(cmd, args...)` | 同步执行命令（= Start + Wait） |
+| `Start(cmd, args...)` | 异步启动命令 |
+| `Wait()` | 阻塞等待完成，返回 ExecResult |
+| `Signal(sig)` | 向隔离进程发送信号 |
+| `Cleanup()` | 终止进程 + 逆序执行清理钩子 |
+| `PID()` | 返回宿主机侧 PID |
+| `Running()` | 是否正在运行 |
+| `Done()` | 完成通知 channel |
+| `NsPath(nsType)` | 返回 `/proc/<pid>/ns/<type>` 路径 |
+| `AddCleanup(fn)` | 注册清理函数 |
+
+### Reexec 机制（init_linux.go）
+
+子进程初始化使用 reexec 模式而非直接 fork + exec：
+
+1. 父进程通过 `/proc/self/exe __sandbox_init__` 重新执行自身
+2. `MustReexecInit()` 在 `main()` 第一行检测标记，进入 `nsInit()` 流程
+3. 子进程从 fd 3 读取 `initConfig`（JSON），按顺序执行初始化
+4. 最终通过 `syscall.Exec()` 替换为用户命令
+
+初始化顺序：
+```
+mount propagation private → mountOverlay → doPivotRoot
+→ mountProc → sethostname → setupLoopback → applySeccomp → exec
 ```
 
-**实现要点**：
-- 使用 `unshare(CLONE_NEWIPC)` 创建新IPC Namespace
-- Agent的`shmget/msgget/semget`只能在新Namespace中操作
-- 防止跨Namespace的IPC攻击
+### Clone Flags 组合
 
-**关键实现**：
-```
-CLONE_NEWIPC
-  ├─ 独立的System V IPC命名空间
-  ├─ 独立的POSIX消息队列（mq_open等）
-  └─ 不影响宿主机IPC资源
-```
+`cloneFlags()` 根据配置动态组合：
 
-### 3. Mount Namespace隔离
-
-**实现要点**：
-- 使用 `unshare(CLONE_NEWNS)` 创建新Mount Namespace
-- Agent可以挂载/卸载文件系统，不影响宿主机
-- 为后续的OverlayFS挂载做准备
-
-**关键考虑**：
-- 初始继承宿主机的挂载点
-- 配置为"私有"挂载传播（private mount propagation）
-- 后续使用OverlayFS替换根文件系统
-
-### 4. Network Namespace隔离
-
-**实现要点** (基础，详细在第2阶段)：
-- 使用 `unshare(CLONE_NEWNET)` 创建新Network Namespace
-- Agent有独立的网络栈（lo, eth等网卡）
-- 后续通过veth pair与宿主机通信
-
-**初始状态**：
-- 新Network Namespace仅有lo（loopback）
-- 其他网络接口通过veth pair添加（第2阶段）
+| 配置项 | Clone Flag |
+|--------|-----------|
+| PID | `CLONE_NEWPID` |
+| IPC | `CLONE_NEWIPC` |
+| Mount | `CLONE_NEWNS` |
+| Network | `CLONE_NEWNET` |
+| UTS | `CLONE_NEWUTS` |
 
 ---
 
@@ -106,277 +158,109 @@ CLONE_NEWIPC
 
 ### 功能验收
 
-**PID Namespace**：
-- ✅ 创建新PID Namespace后，`getpid()` 返回1
-- ✅ 子进程PPid为1（无法看到真实父进程）
-- ✅ `ps aux` 仅显示隔离环境的进程
-- ✅ 销毁Namespace时进程被正确清理
-
-**IPC Namespace**：
-- ✅ `ipcs` 在隔离环境中为空（无继承的IPC）
-- ✅ Agent创建的IPC资源不在`ipcs`全局结果中
-- ✅ 宿主机和Agent的IPC资源完全隔离
-
-**Mount Namespace**：
-- ✅ 创建后可独立挂载文件系统
-- ✅ `mount` 操作仅影响隔离环境，不影响宿主机
-- ✅ 卸载时资源正确释放
-
-**Network Namespace**：
-- ✅ 创建后有独立的network stack
-- ✅ `ip link show` 仅显示隔离环境的网卡
-- ✅ 初始仅有lo网卡
-
-**清理机制**：
-- ✅ Namespace销毁后，`/proc/[pid]/ns/` 文件消失
-- ✅ 所有隔离资源被释放
-- ✅ 无资源泄漏
+- [x] PID Namespace：`echo $$` 返回 1
+- [x] IPC Namespace：`ipcs -q` 在隔离环境中为空
+- [x] Mount Namespace：独立挂载不影响宿主机
+- [x] Network Namespace：仅有 lo 网卡，宿主机 eth0 不可见
+- [x] UTS Namespace：hostname 可自定义（默认 "sandbox"）
+- [x] 清理机制：Cleanup 后进程终止、资源释放
+- [x] 清理钩子按注册逆序执行
+- [x] 退出码正确传递
+- [x] 环境变量传递（过滤内部变量）
+- [x] 防止重复 Start
+- [x] 并发 Namespace 互不干扰
 
 ### 性能验收
 
-| 指标 | 目标 | 实际 |
+| 指标 | 目标 | 说明 |
 |------|------|------|
-| **创建时间** | < 50ms | 待测 |
-| **内存开销** | < 1MB | 待测 |
-| **清理时间** | < 10ms | 待测 |
+| **创建时间** | < 50ms | Namespace 创建 + fork |
+| **内存开销** | < 1MB | 管理器本身 |
+| **清理时间** | < 10ms | 终止进程 + 执行清理链 |
 
 ---
 
-## 实现步骤
+## 测试覆盖
 
-### 第1-2天：基础PID + IPC Namespace
+### 单元测试（不需要 root）
 
-**任务**：
-1. 学习Namespace基础
-   - 读Linux man手册：`man namespaces`
-   - 研究`unshare`和`clone`系统调用
-   - 理解Namespace的生命周期
+| 测试函数 | 说明 |
+|----------|------|
+| `TestDefaultNamespaceConfig` | 默认配置启用所有 Namespace |
+| `TestMinimalNamespaceConfig` | 最小配置仅启用 PID + Mount |
+| `TestCloneFlags` | Clone flags 正确组合 |
 
-2. 实现PID Namespace创建和验证
-   ```go
-   // 伪代码示意
-   type Namespace struct {
-       PID   int
-       Path  string
-   }
+### 集成测试（需要 root）
 
-   func (n *Namespace) CreatePIDNamespace() error {
-       // 使用syscall.UnshareUnsafe或cmd.SysProcAttr
-       // 创建新PID Namespace
-   }
-   ```
+| 测试函数 | 说明 |
+|----------|------|
+| `TestPIDNamespace` | PID=1 验证 |
+| `TestIPCNamespace` | IPC 隔离验证 |
+| `TestNetworkNamespace` | 仅 lo 网卡，无 eth0 |
+| `TestUTSNamespace` | hostname 设置验证 |
+| `TestAllNamespaces` | 全部 Namespace 同时工作 |
+| `TestCleanup` | 清理后进程终止 |
+| `TestCleanupHooks` | 清理钩子逆序执行 |
+| `TestDoubleStart` | 禁止重复 Start |
+| `TestNsPath` | procfs 路径正确且存在 |
+| `TestExitCode` | 退出码正确传递 |
+| `TestEnvPassing` | 环境变量传递 |
+| `TestConcurrentNamespaces` | 10 并发 Namespace |
 
-3. 实现IPC Namespace创建和验证
-   - 类似PID Namespace的方式
-
-**交付物**：
-- `pkg/sandbox/namespace.go` 基础框架
-- 单元测试：`test/namespace_test.go`
-
-### 第3-4天：Mount + Network Namespace
-
-**任务**：
-1. 实现Mount Namespace
-   - 创建并验证挂载隔离
-
-2. 实现Network Namespace
-   - 创建基础网络命名空间
-   - 验证lo网卡存在
-
-3. 统一的Namespace管理接口
-   ```go
-   type SandboxNamespace struct {
-       PID     *os.Process
-       NsPath  string
-       Cleanup func() error
-   }
-   ```
-
-**交付物**：
-- Mount和Network Namespace支持
-- 集成测试用例
-
-### 第5天：清理和测试优化
-
-**任务**：
-1. 实现完整的Namespace生命周期管理
-   - 创建 → 运行 → 清理
-
-2. 处理边界情况
-   - 进程异常退出
-   - 清理失败重试
-   - 资源泄漏检查
-
-3. 性能测试和优化
-   - 测量创建/清理时间
-   - 进行压力测试（多并发隔离环境）
-
-**交付物**：
-- 完整的生产级代码
-- 性能基准测试报告
-
----
-
-## 关键技术点
-
-### Namespace 创建方式
-
-**方式1：unshare()** （推荐）
-```
-优点：简单，不需要fork
-缺点：进程已在新Namespace中，看不到之前的资源
-用途：创建隔离环境
-```
-
-**方式2：clone()** （备选）
-```
-优点：可精细控制进程行为
-缺点：需要fork，相对复杂
-用途：可与fork合并使用
-```
-
-### Namespace 文件系统接口
-
-```
-/proc/[pid]/ns/
-├─ pid      # PID Namespace inode
-├─ ipc      # IPC Namespace inode
-├─ mnt      # Mount Namespace inode
-├─ net      # Network Namespace inode
-├─ uts      # UTS Namespace inode
-└─ user     # User Namespace inode (可选)
-```
-
-**用途**：
-- 检查Namespace是否存在
-- 加入存在的Namespace：`nsenter -t $PID -n bash`
-
-### 进程生命周期
-
-```
-创建Namespace
-    ↓
-exec Agent进程
-    ↓
-Agent运行
-    ↓
-Agent退出
-    ↓
-Namespace销毁（当所有进程都退出）
-```
-
----
-
-## 测试策略
-
-### 单元测试
+### 运行测试
 
 ```bash
-# 测试PID Namespace
-./test/pid_namespace_test.go
-  ✓ TestCreatePIDNamespace
-  ✓ TestProcessInNamespace
-  ✓ TestNamespacePIDIs1
-  ✓ TestCleanupPIDNamespace
+# 单元测试（无需 root）
+go test -v -run "TestDefault|TestMinimal|TestCloneFlags" ./pkg/sandbox/
 
-# 测试IPC Namespace
-./test/ipc_namespace_test.go
-  ✓ TestCreateIPCNamespace
-  ✓ TestIPCIsolation
-  ✓ TestCleanupIPCNamespace
-
-# 测试Mount Namespace
-./test/mount_namespace_test.go
-  ✓ TestCreateMountNamespace
-  ✓ TestMountIsolation
-  ✓ TestCleanupMountNamespace
-
-# 测试Network Namespace
-./test/network_namespace_test.go
-  ✓ TestCreateNetworkNamespace
-  ✓ TestNetworkIsolation
-  ✓ TestLoopbackOnly
-```
-
-### 集成测试
-
-```bash
-# 所有Namespace配合工作
-./test/integration_namespace_test.go
-  ✓ TestAllNamespacesTogether
-  ✓ TestMultipleSandboxes
-  ✓ TestCleanupAllResources
-```
-
-### 性能测试
-
-```bash
-# 性能基准
-./test/benchmark_namespace_test.go
-  BenchmarkCreateNamespace
-  BenchmarkCleanupNamespace
-  BenchmarkConcurrentNamespaces(100)
+# 集成测试（需要 root）
+sudo go test -v -run "TestPID|TestIPC|TestNetwork|TestUTS|TestAll|TestCleanup|TestDouble|TestNsPath|TestExitCode|TestEnv|TestConcurrent" ./pkg/sandbox/
 ```
 
 ---
 
-## 依赖和前置条件
+## 实现文件
 
-### 系统要求
-- Linux Kernel >= 4.10 (最新Namespace特性)
-- 足够的权限（通常需要root或CAP_SYS_ADMIN）
-
-### Go库依赖
-- `syscall` (标准库)
-- `os/exec` (标准库)
-
-### 可选工具
-- `nsenter` - 进入Namespace进行验证
-- `unshare` - 命令行创建Namespace
-- `lsns` - 列出所有Namespace
+| 文件 | 说明 |
+|------|------|
+| `pkg/sandbox/namespace.go` | Namespace 管理器主体（505 行） |
+| `pkg/sandbox/init_linux.go` | 子进程 init 逻辑（231 行） |
+| `pkg/sandbox/namespace_test.go` | 测试用例（404 行） |
 
 ---
 
 ## 常见陷阱和解决方案
 
-### 1. "Permission denied" 错误
-**问题**：创建Namespace失败
-**解决**：需要root权限或CAP_SYS_ADMIN
+### 1. PID 不是 1
+**问题**：创建 PID Namespace 后，`getpid()` 不返回 1
+**解决**：必须在新 Namespace 中 exec 新进程。reexec 模式确保子进程是新 PID Namespace 的 init 进程。
 
-### 2. PID不是1
-**问题**：创建PID Namespace后，getpid()仍不返回1
-**解决**：确保在新Namespace中exec进程，而不是fork
+### 2. "Permission denied" 错误
+**问题**：创建 Namespace 失败
+**解决**：需要 root 权限或 CAP_SYS_ADMIN。
 
-### 3. 资源泄漏
-**问题**：Namespace创建很多但清理不完整
-**解决**：确保所有进程都正确终止，使用`pgrep`验证
+### 3. Mount 事件泄漏到宿主机
+**问题**：子进程的 mount 操作影响了宿主机
+**解决**：`nsInit()` 第一步设置 `MS_PRIVATE|MS_REC` 传播属性。
 
-### 4. 网络Namespace创建失败
-**问题**：CLONE_NEWNET返回EBUSY
-**解决**：可能是系统限制，确保内核支持
-
----
-
-## 下一步
-
-- 完成后，与模块1.2（OverlayFS）集成
-- 为Seccomp规则准备（需要Namespace环境）
-- 支持网络配置（veth pair，在第2阶段）
+### 4. 管道竞态
+**问题**：子进程在配置写入前就开始读取
+**解决**：子进程 fork 后阻塞在管道读取，父进程先将进程加入 cgroup，再写入配置，最后关闭管道。
 
 ---
 
-**模块时间表**：
-- 开发：1周
-- 测试：与开发并行
-- 集成：与1.2/1.3并行
+## 与其他模块的关系
 
-**关键成功指标**：
-- ✅ 所有测试通过
-- ✅ 性能指标达标
-- ✅ 无资源泄漏
-- ✅ 代码文档完整
+```
+Namespace（核心骨架）
+  ├─ SetOverlayFS()  → 模块1.2（文件系统隔离）
+  ├─ SetCgroupsV2()  → 模块1.3（资源限制）
+  ├─ SetSeccomp()    → 模块2.1（系统调用过滤）
+  └─ SetPivotRoot()  → 模块2.2（目录禁锢）
+```
+
+所有模块通过 `Namespace` 的 Set 方法注入配置，在 `nsInit()` 中按顺序执行初始化，在 `Cleanup()` 中逆序清理。
 
 ---
 
-**更新日期**：2024-02-10
-**责任人**：系统组
+**更新日期**：2025-02-11

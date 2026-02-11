@@ -109,6 +109,26 @@ func nsInit() error {
 		}
 	}
 
+	// 3.5. pivot_root（目录禁锢）
+	// 在 OverlayFS 之后、/proc 之前执行
+	// pivot_root 后子进程完全无法访问宿主机文件系统
+	if cfg.PivotRoot != nil {
+		newRoot := cfg.PivotRoot.RootDir
+		if cfg.Overlay != nil {
+			newRoot = cfg.Overlay.MergeDir // overlay 的 merged 目录作为新 root
+		}
+		if newRoot != "" {
+			// 在 pivot_root 前创建最小 /dev 设备
+			if err := setupMinimalDev(newRoot); err != nil {
+				writeInitLog(logWriter, "warn", fmt.Sprintf("setup /dev: %v (non-fatal)", err))
+			}
+			if err := doPivotRoot(newRoot); err != nil {
+				return fmt.Errorf("pivot_root: %w", err)
+			}
+			writeInitLog(logWriter, "info", "pivot_root completed")
+		}
+	}
+
 	// 4. 重新挂载/proc（PID Namespace需要）
 	// 挂载后 ps/top 等工具才能正确显示Namespace内的进程
 	if cfg.MountProc {
@@ -145,6 +165,15 @@ func nsInit() error {
 
 	// 9. 准备环境变量
 	env := buildCleanEnv(cfg.Env)
+
+	// 9.5. 加载 Seccomp-BPF 过滤器
+	// 必须在所有特权操作（mount、pivot_root、sethostname）完成后、exec 前加载
+	// 一旦 seccomp 生效，当前进程也受 syscall 白名单限制
+	if cfg.Seccomp != nil {
+		if err := applySeccomp(cfg.Seccomp); err != nil {
+			return fmt.Errorf("seccomp: %w", err)
+		}
+	}
 
 	// 10. exec用户命令（替换当前进程映像）
 	if cfg.Command == "" {

@@ -16,13 +16,13 @@
 
 ### 📋 我想了解某个具体模块
 **阶段1模块**：
-- [模块1.1 - Namespace隔离](./modules/module-1.1-namespace.md)
-- 模块1.2 - OverlayFS文件系统 (待创建)
-- 模块1.3 - Cgroups v2资源限制 (待创建)
+- [模块1.1 - Namespace隔离](./modules/module-1.1-namespace.md) (已完成)
+- [模块1.2 - OverlayFS文件系统](./modules/module-1.2-overlayfs.md) (已完成)
+- [模块1.3 - Cgroups v2资源限制](./modules/module-1.3-cgroups.md) (已完成)
 
 **阶段2模块**：
-- 模块2.1 - Seccomp-BPF (待创建)
-- 模块2.2 - Chroot/Pivot Root (待创建)
+- [模块2.1 - Seccomp-BPF](./modules/module-2.1-seccomp.md) (已完成)
+- [模块2.2 - Pivot Root](./modules/module-2.2-pivotroot.md) (已完成)
 - 模块2.3 - Sidecar Proxy (待创建)
 
 **后续模块**：(待创建)
@@ -57,9 +57,10 @@ docs/development/
 │
 ├── modules/                    # 详细的模块规划
 │   ├── module-1.1-namespace.md
-│   ├── module-1.2-overlayfs.md (待创建)
-│   ├── module-1.3-cgroups.md (待创建)
-│   ├── module-2.1-seccomp.md (待创建)
+│   ├── module-1.2-overlayfs.md
+│   ├── module-1.3-cgroups.md
+│   ├── module-2.1-seccomp.md
+│   ├── module-2.2-pivotroot.md
 │   └── ... (更多模块)
 │
 ├── references/                 # 技术参考
@@ -79,8 +80,8 @@ docs/development/
 
 | 时间 | 里程碑 | 交付物 | 状态 |
 |------|--------|--------|------|
-| **第2周末** | 基础隔离MVP | 能创建和运行隔离的Agent沙箱 | 📋 规划中 |
-| **第4周末** | 安全隔离 | 能安全执行代码，拦截恶意syscall | 📋 规划中 |
+| **第2周末** | 基础隔离MVP | 能创建和运行隔离的Agent沙箱 | ✅ 已完成 |
+| **第4周末** | 安全隔离 | 能安全执行代码，拦截恶意syscall | ✅ 已完成 |
 | **第6周末** | 快照恢复 | 支持Agent快照和故障恢复 | 📋 规划中 |
 | **第9周末** | 完整系统 | 支持顺序/并行/并发Workflow编排 | 📋 规划中 |
 | **第10周+** | 高级能力 | eBPF监控和异常检测（可选） | 📋 规划中 |
