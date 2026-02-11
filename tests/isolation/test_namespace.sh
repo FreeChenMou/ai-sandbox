@@ -1,53 +1,12 @@
 #!/bin/bash
 # test_namespace.sh - Namespace 模块测试脚本
-# 在 WSL2 环境中以 root 运行: sudo bash test_namespace.sh
+# 用法: sudo bash tests/isolation/test_namespace.sh
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$SCRIPT_DIR"
-cd "$PROJECT_DIR"
-echo "项目目录: $PROJECT_DIR"
-
-# sudo 下保留 go 环境
-export HOME="${HOME:-/root}"
-export PATH="$PATH:/home/xjh/go/bin"
-if command -v go &>/dev/null; then
-    export GOPATH="${GOPATH:-$(go env GOPATH)}"
-    export PATH="$PATH:$GOPATH/bin"
-fi
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-pass=0
-fail=0
-skip=0
-
-log_pass() { echo -e "  ${GREEN}[PASS]${NC} $1"; pass=$((pass + 1)); }
-log_fail() { echo -e "  ${RED}[FAIL]${NC} $1"; fail=$((fail + 1)); }
-log_skip() { echo -e "  ${YELLOW}[SKIP]${NC} $1"; skip=$((skip + 1)); }
-log_info() { echo -e "         $1"; }
-section()  { echo -e "\n${CYAN}=== $1 ===${NC}"; }
-
-run_test() {
-    local name="$1"
-    local timeout="${2:-60s}"
-    local output
-    output=$(go test -v -timeout "$timeout" -run "^${name}$" ./pkg/sandbox/ 2>&1)
-    if echo "$output" | grep -q "^--- PASS:"; then
-        log_pass "$name"
-    elif echo "$output" | grep -q "^--- SKIP:"; then
-        log_skip "$name"
-        log_info "$(echo "$output" | grep 'SKIP' | head -1)"
-    else
-        log_fail "$name"
-        echo "$output" | tail -8 | while IFS= read -r line; do log_info "$line"; done
-    fi
-}
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+source "$SCRIPT_DIR/../common.sh"
 
 echo "============================================"
 echo "  Namespace 模块测试"
@@ -57,13 +16,7 @@ echo "============================================"
 section "0. 环境检查"
 # -----------------------------------------------
 
-if [ "$(id -u)" -ne 0 ]; then
-    echo -e "${RED}错误: 需要 root 权限${NC}"
-    echo "用法: sudo bash $0"
-    exit 1
-fi
-log_pass "root 权限"
-echo -e "  内核: $(uname -r)"
+check_root
 
 if command -v ip &>/dev/null; then
     log_pass "ip 命令可用"
@@ -75,19 +28,7 @@ fi
 section "1. 编译验证"
 # -----------------------------------------------
 
-if go build ./... 2>&1; then
-    log_pass "go build ./..."
-else
-    log_fail "go build ./..."
-    echo -e "${RED}编译失败，终止测试${NC}"
-    exit 1
-fi
-
-if go vet ./... 2>&1; then
-    log_pass "go vet ./..."
-else
-    log_fail "go vet ./..."
-fi
+check_build
 
 # -----------------------------------------------
 section "2. 单元测试（不需要 root）"
@@ -201,23 +142,4 @@ else
 fi
 
 # -----------------------------------------------
-# 汇总
-# -----------------------------------------------
-
-echo ""
-echo "============================================"
-echo "  Namespace 测试结果"
-echo "============================================"
-echo -e "  ${GREEN}通过: $pass${NC}"
-echo -e "  ${RED}失败: $fail${NC}"
-echo -e "  ${YELLOW}跳过: $skip${NC}"
-echo "  总计: $((pass + fail + skip))"
-echo ""
-
-if [ $fail -gt 0 ]; then
-    echo -e "${RED}存在失败的测试${NC}"
-    exit 1
-else
-    echo -e "${GREEN}所有测试通过！${NC}"
-    exit 0
-fi
+print_summary "Namespace 测试结果"
