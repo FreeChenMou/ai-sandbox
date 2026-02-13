@@ -23,7 +23,7 @@
 
 #### 阶段2：权限控制（安全关键）
 - [2.1 Seccomp-BPF系统调用过滤](./docs/development/modules/module-2.1-seccomp.md)
-- [2.2 Chroot/Pivot Root隔离](./docs/development/modules/module-2.2-chroot.md)
+- [2.2 Pivot Root目录禁锢](./docs/development/modules/module-2.2-pivotroot.md)
 - [2.3 Sidecar Proxy API审计](./docs/development/modules/module-2.3-proxy.md)
 
 #### 阶段3：快照恢复（性能优化）
@@ -73,7 +73,7 @@
 - ✅ 恶意系统调用被内核拦截
 - ✅ Agent被安全kill，无信息泄露
 - ✅ Seccomp规则加载和生效
-- ✅ 双层防护：Seccomp + Chroot
+- ✅ 双层防护：Seccomp + Pivot Root
 
 **关键文档**：[阶段2详细规划](./docs/development/phase-2-permission.md)
 
@@ -186,7 +186,7 @@ MVP验证:    ✓    ✓    ✓    ✓    ✓    ✓    ✓
 │ • OverlayFS      │
 │ • Cgroups        │
 │ • Seccomp        │
-│ • Chroot         │
+│ • Pivot Root     │
 │ • CRIU快照       │
 └──────────────────┘
 ```

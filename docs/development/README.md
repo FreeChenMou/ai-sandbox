@@ -9,7 +9,7 @@
 
 ### 🔍 我想了解具体某个阶段
 - [阶段1：基础隔离](./phase-1-isolation.md) - Namespace、OverlayFS、Cgroups
-- [阶段2：权限控制](./phase-2-permission.md) - Seccomp、Chroot、API审计
+- [阶段2：权限控制](./phase-2-permission.md) - Seccomp、Pivot Root、API审计
 - [阶段3：快照恢复](./phase-3-snapshot.md) - CRIU、热启动
 - [阶段4：Workflow编排](./phase-4-orchestration.md) - DAG、调度器、恢复
 - [阶段5：可选增强](./phase-5-enhancement.md) - eBPF、异常检测
@@ -25,8 +25,11 @@
 - [模块2.2 - Pivot Root](./modules/module-2.2-pivotroot.md) (已完成)
 - 模块2.3 - Sidecar Proxy (待创建)
 
+**阶段3模块**：
+- [模块3.1 - CRIU快照集成](./modules/module-3.1-criu.md) (规划中)
+- [模块3.2 - 预热与快速恢复](./modules/module-3.2-warmup.md) (规划中)
+
 **后续模块**：(待创建)
-- 模块3.1 - CRIU快照集成
 - 模块4.1 - DAG执行引擎
 - 等等...
 
